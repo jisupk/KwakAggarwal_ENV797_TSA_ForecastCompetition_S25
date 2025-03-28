@@ -1,0 +1,132 @@
+---
+title: "Electricity Demand Forecast"
+author: "Ananya Aggarwal_Jisup Kwak"
+date: "2025-03-28"
+output: html_document
+---
+
+## Setting R code chunk options
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,tidy.opts=list(width.cutoff=80), tidy=FALSE)
+knitr::opts_knit$set(root.dir = "~/R/Time Series Analysis/TSA_Final/KwakAggarwal_ENV797_TSA_ForecastCompetition_S25")
+```
+
+## Loading packages and initializing
+
+Second R code chunk is for loading packages. By setting message = FALSE, the code will appear but not the output.
+
+```{r package, message=FALSE}
+library(readxl)
+library(lubridate)
+library(ggplot2)
+library(forecast)  
+#library(Kendall)
+library(tseries)
+#library(outliers)
+library(tidyverse)
+library(smooth)
+library(tidyr)
+library(dplyr)
+#New package for M9 to assist with tables
+#install.packages("kableExtra")
+library(kableExtra)
+
+```
+
+## Importing data
+
+Hourly Electricity Demand, Temperature, Humidity from 01-01-2005 to 12-31-2010.
+
+```{r}
+# Organizing data of Electricity Demand
+original_hourly_demand <- read_excel(path = "./Data/load.xlsx", skip = 0, sheet = "Sheet1", col_names = TRUE)
+original_hourly_demand <- original_hourly_demand[ , -1]
+
+
+hourly_demand <- original_hourly_demand %>%
+  pivot_longer(
+    cols = starts_with("h"),
+    names_to = "hour",
+    values_to = "demand"
+  )
+
+hourly_demand <- hourly_demand %>%
+  mutate(hour = as.integer(sub("h", "", hour)) - 1)
+
+hourly_demand <- hourly_demand %>%
+  mutate(
+    datetime = ymd(date) + hours(hour)
+  ) %>%
+  select(datetime, demand) %>%
+  arrange(datetime)
+
+
+# Organizing data of Temperature
+original_hourly_temp <- read_excel(path = "./Data/temperature.xlsx", skip = 0, sheet = "Sheet1", col_names = TRUE)
+
+hourly_temp <- original_hourly_temp %>%
+  mutate(
+    hour = hr - 1,
+    datetime = ymd(date) + hours(hour)
+  ) %>%
+  select(datetime, starts_with("t_ws"))
+
+
+# Organizing data of Relative Humidity
+original_hourly_humid <- read_excel(path = "./Data/relative_humidity.xlsx", skip = 0, sheet = "Sheet1", col_names = TRUE)
+
+hourly_humid <- original_hourly_humid %>%
+  mutate(
+    hour = hr - 1,
+    datetime = ymd(date) + hours(hour)
+  ) %>%
+  select(datetime, starts_with("rh_ws"))
+
+
+```
+
+## Analyzing data
+2005: 365days
+2006: 365days
+2007: 365days
+2008: 366days
+2009: 365days
+2010: 365days
+
+```{r}
+# Hourly Electricity Demand
+summary(hourly_demand)
+na_demand <- sum(is.na(hourly_demand$demand))
+which(is.na(hourly_demand$demand))
+mean_demand <- mean(hourly_demand$demand, na.rm = TRUE)
+
+# Initial Plots
+ggplot(hourly_demand, aes(x = datetime, y = demand)) +
+  geom_line(color = "darkblue") +
+  geom_hline(yintercept = mean_demand, color = "red", size = 0.8) +
+  labs(title = "Hourly Electricity Demand",
+       subtitle = paste("Mean Demand =", round(mean_demand, 2), "MW"),
+       x = "Datetime", y = "Demand (MW)") +
+  theme_minimal()
+
+# ACF, PACF
+par(mfrow=c(1,2))
+ACF_Plot <- Acf(hourly_demand$demand, lag = 40, plot = TRUE)
+PACF_Plot <- Pacf(hourly_demand$demand, lag = 40)
+
+# Transforming the series into time series object.
+ts_hourly_demand <- msts(hourly_demand$demand,
+seasonal.periods =c(24,168,8766),
+start=c(2005,01,01))
+head(ts_hourly_demand)
+summary(ts_hourly_demand)
+
+# Decomposing
+decompose_hourly_demand <- decompose(hourly_demand[,"demand"],"additive")
+plot(decompose_residential_price)
+
+
+```
+
+
