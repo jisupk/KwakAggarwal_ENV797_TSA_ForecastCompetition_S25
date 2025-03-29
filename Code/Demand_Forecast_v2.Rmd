@@ -1,0 +1,208 @@
+---
+title: "Electricity Demand Forecast"
+author: "Ananya Aggarwal_Jisup Kwak"
+date: "2025-03-28"
+output: html_document
+---
+
+## Setting R code chunk options
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,tidy.opts=list(width.cutoff=80), tidy=FALSE)
+knitr::opts_knit$set(root.dir = "~/R/Time Series Analysis/TSA_Final/KwakAggarwal_ENV797_TSA_ForecastCompetition_S25")
+```
+
+## Loading packages and initializing
+
+Second R code chunk is for loading packages. By setting message = FALSE, the code will appear but not the output.
+
+```{r package, message=FALSE}
+library(readxl)
+library(lubridate)
+library(ggplot2)
+library(forecast)  
+#library(Kendall)
+library(tseries)
+#library(outliers)
+library(tidyverse)
+library(smooth)
+library(tidyr)
+library(dplyr)
+library(imputeTS)
+#New package for M9 to assist with tables
+#install.packages("kableExtra")
+library(kableExtra)
+
+```
+
+## Importing data
+
+Hourly Electricity Demand, Temperature, Humidity from 01-01-2005 to 12-31-2010.
+
+```{r}
+# Organizing data of Electricity Demand
+original_hourly_demand <- read_excel(path = "./Data/load.xlsx", skip = 0, sheet = "Sheet1", col_names = TRUE)
+original_hourly_demand <- original_hourly_demand[ , -1]
+
+
+hourly_demand <- original_hourly_demand %>%
+  pivot_longer(
+    cols = starts_with("h"),
+    names_to = "hour",
+    values_to = "demand"
+  )
+
+hourly_demand <- hourly_demand %>%
+  mutate(hour = as.integer(sub("h", "", hour)) - 1)
+
+hourly_demand <- hourly_demand %>%
+  mutate(
+    datetime = ymd(date) + hours(hour)
+  ) %>%
+  select(datetime, demand) %>%
+  arrange(datetime)
+
+
+# Organizing data of Temperature
+original_hourly_temp <- read_excel(path = "./Data/temperature.xlsx", skip = 0, sheet = "Sheet1", col_names = TRUE)
+
+hourly_temp <- original_hourly_temp %>%
+  mutate(
+    hour = hr - 1,
+    datetime = ymd(date) + hours(hour)
+  ) %>%
+  select(datetime, starts_with("t_ws"))
+
+
+# Organizing data of Relative Humidity
+original_hourly_humid <- read_excel(path = "./Data/relative_humidity.xlsx", skip = 0, sheet = "Sheet1", col_names = TRUE)
+
+hourly_humid <- original_hourly_humid %>%
+  mutate(
+    hour = hr - 1,
+    datetime = ymd(date) + hours(hour)
+  ) %>%
+  select(datetime, starts_with("rh_ws"))
+
+
+```
+
+## Analyzing data
+2005: 365days
+2006: 365days
+2007: 365days
+2008: 366days
+2009: 365days
+2010: 365days
+
+```{r}
+# Hourly Electricity Demand
+summary(hourly_demand)
+na_demand <- sum(is.na(hourly_demand$demand))
+which(is.na(hourly_demand$demand))
+mean_demand <- mean(hourly_demand$demand, na.rm = TRUE)
+
+# Initial Plots
+ggplot(hourly_demand, aes(x = datetime, y = demand)) +
+  geom_line(color = "darkblue") +
+  geom_hline(yintercept = mean_demand, color = "red", size = 0.8) +
+  labs(title = "Hourly Electricity Demand",
+       subtitle = paste("Mean Demand =", round(mean_demand, 2), "MW"),
+       x = "Datetime", y = "Demand (MW)") +
+  theme_minimal()
+
+# ACF, PACF
+par(mfrow=c(1,2))
+ACF_Plot <- Acf(hourly_demand$demand, lag = 40, plot = TRUE)
+PACF_Plot <- Pacf(hourly_demand$demand, lag = 40)
+
+# Transforming the series into time series object.
+ts_hourly_demand <- msts(hourly_demand$demand,
+seasonal.periods =c(24,168,8766),
+start=c(2005,01,01))
+ts_hourly_demand <- na_interpolation(ts_hourly_demand, option = "linear")
+head(ts_hourly_demand)
+summary(ts_hourly_demand)
+
+# Decomposing
+# seasonal-24
+# seasonal-168
+# seasonal-8766
+ts_hourly_demand %>% mstl() %>%
+autoplot()
+
+
+
+
+
+```
+# Creating a subset
+
+
+```{r}
+#create a subset for training purpose
+n_for = 8765
+ts_hourly_demand_train <- subset(ts_hourly_demand,
+  end = length(ts_hourly_demand)-n_for)
+#create a subset for testing purpose
+ts_hourly_demand_test <- subset(ts_hourly_demand,
+start = length(ts_hourly_demand)-n_for)
+autoplot(ts_hourly_demand_train)
+autoplot(ts_hourly_demand_test)
+
+```
+
+# Forecasting Hourly Electricity Demand
+# Model 1: STL + ETS
+
+```{r}
+# Model 1: STL + ETS
+#Fit and forecast STL + ETS model to data
+ETS_fit <- stlf(ts_hourly_demand_train, h=8766)
+#Plot foresting results
+autoplot(ETS_fit) + ylab("Hourly Electricity Demand")
+#Plot model + observed data
+autoplot(ts_hourly_demand) +
+autolayer(ETS_fit, series="STL + ETS",PI=FALSE) +
+ylab("Hourly Electricity Demand")
+
+
+# 실제와 예측값을 하나의 데이터프레임으로 결합
+df_compare <- data.frame(
+  Time = time(ts_hourly_demand_test),
+  Actual = as.numeric(ts_hourly_demand_test),
+  Forecast = as.numeric(ETS_fit$mean)
+)
+
+# 예측구간에 대한 비교 그래프
+ggplot(df_compare, aes(x = Time)) +
+  geom_line(aes(y = Actual, color = "Actual")) +
+  geom_line(aes(y = Forecast, color = "Forecast")) +
+  ylab("Hourly Electricity Demand") +
+  ggtitle("Forecast vs Actual (Forecast Horizon Only)") +
+  scale_color_manual(name = "", values = c("Actual" = "black", "Forecast" = "blue")) +
+  theme_minimal()
+
+df_compare$Residuals <- df_compare$Actual - df_compare$Forecast
+ggplot(df_compare, aes(x = Time, y = Residuals)) +
+  geom_line(color = "darkblue") +
+  ylab("Residuals") +
+  ggtitle("Residual Plot: Actual - Forecast (STL + ETS)") +
+  theme_minimal()
+ggplot(df_compare, aes(x = Residuals)) +
+  geom_histogram(binwidth = 10, fill = "steelblue", color = "black") +
+  ggtitle("Histogram of Residuals") +
+  xlab("Residuals") +
+  theme_minimal()
+plot(ETS_fit$residuals)
+checkresiduals(ETS_fit)
+acf(na.omit(df_compare$Residuals), main = "ACF of Residuals")
+
+names(ETS_fit)
+ETS_fit$fitted
+
+accuracy_result <- accuracy(ETS_fit$mean, ts_hourly_demand_test)
+print(accuracy_result)
+```
+
+
