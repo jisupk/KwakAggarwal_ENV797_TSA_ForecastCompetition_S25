@@ -1,0 +1,5 @@
+format - col.1 = meter_id; col.2 = date
+       - columns = 24 hours
+       - rows = days (6 years - 1 leap year)
+
+missing data? 6 hours in total : all in h2 (March-April)
