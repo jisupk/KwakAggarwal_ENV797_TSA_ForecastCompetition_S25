@@ -1,0 +1,632 @@
+---
+title: "Electricity Demand Forecast"
+author: "Ananya Aggarwal_Jisup Kwak"
+date: "2025-03-28"
+output: html_document
+---
+
+## Setting R code chunk options
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,tidy.opts=list(width.cutoff=80), tidy=FALSE)
+
+```
+
+## Loading packages and initializing
+
+Second R code chunk is for loading packages. By setting message = FALSE, the code will appear but not the output.
+
+```{r package, message=FALSE}
+library(readxl)
+library(lubridate)
+library(ggplot2)
+library(forecast)  
+#library(Kendall)
+library(tseries)
+#library(outliers)
+library(tidyverse)
+library(smooth)
+library(tidyr)
+library(dplyr)
+library(imputeTS)
+#New package for M9 to assist with tables
+#install.packages("kableExtra")
+library(kableExtra)
+library(zoo)
+library(writexl)
+
+```
+
+## Importing data
+
+Hourly Electricity Demand, Temperature, Humidity from 01-01-2005 to 12-31-2010.
+
+```{r}
+# Organizing data of Electricity Demand
+original_hourly_demand <- read_excel(path = "../Data/load.xlsx", skip = 0, sheet = "Sheet1", col_names = TRUE)
+original_hourly_demand <- original_hourly_demand[ , -1]
+
+
+hourly_demand <- original_hourly_demand %>%
+  pivot_longer(
+    cols = starts_with("h"),
+    names_to = "hour",
+    values_to = "demand"
+  )
+
+hourly_demand <- hourly_demand %>%
+  mutate(hour = as.integer(sub("h", "", hour)) - 1)
+
+hourly_demand <- hourly_demand %>%
+  mutate(
+    datetime = ymd(date) + hours(hour)
+  ) %>%
+  select(datetime, demand) %>%
+  arrange(datetime)
+
+
+ggplot(hourly_demand, aes(x = datetime, y = demand)) +
+  geom_line(color = "steelblue") +
+  labs(
+    title = "Hourly Electricity Demand",
+    x = "Datetime",
+    y = "Demand (MW)"
+  ) +
+  theme_minimal()
+
+
+
+```
+# Cleaning data
+
+```{r}
+# Check NAs
+summary(hourly_demand)
+msts_demand_original <- msts(hourly_demand$demand,
+                    seasonal.periods =c(24,168,8766),
+                    start=c(2005,01,01))
+
+
+# Check missing months
+# 1. Ensure the 'datetime' column is in POSIXct format
+hourly_demand$datetime <- as.POSIXct(hourly_demand$datetime)
+
+# 2. Create a full sequence of hourly timestamps from the minimum to the maximum datetime
+full_time <- seq(from = min(hourly_demand$datetime, na.rm = TRUE),
+                 to   = max(hourly_demand$datetime, na.rm = TRUE),
+                 by   = "hour")
+
+# 3. Identify missing timestamps by comparing the full sequence with the existing datetimes
+missing_times <- setdiff(full_time, hourly_demand$datetime)
+
+# 4. Display the missing timestamps
+missing_times
+
+hourly_demand$datetime[which(hourly_demand$demand == 0)]
+hourly_demand$datetime[which(is.na(hourly_demand$demand))]
+# Replace 0 values in the demand column with NA
+hourly_demand$demand[hourly_demand$demand < 1500] <- NA
+
+
+# msts time series
+msts_demand_nas <- msts(hourly_demand$demand,
+                    seasonal.periods =c(24,168,8766),
+                    start=c(2005,01,01))
+head(msts_demand_nas)
+autoplot(msts_demand_nas)
+
+# datetime Zoo time series
+zoo_demand <- zoo(hourly_demand$demand, order.by = hourly_demand$datetime)
+head(zoo_demand)
+tail(zoo_demand)
+
+autoplot(zoo_demand) + 
+  ggtitle("Original Hourly Demand Time Series")
+
+
+# TS clean
+# Convert to msts to allow seasonal-aware cleaning (e.g., daily and weekly patterns)
+
+head(msts_demand_nas)
+msts_demand_clean <- na.interp(msts_demand_nas)
+summary(msts_demand_nas)
+summary(msts_demand_clean)
+
+# Convert cleaned series back to zoo format using original datetime index
+zoo_demand_clean <- zoo(msts_demand_clean, order.by = index(zoo_demand))
+
+index(zoo_demand_clean)[which(zoo_demand_clean == 0)]
+
+
+# Plot the cleaned time series
+autoplot(msts_demand_original, series = "Original") +
+  autolayer(msts_demand_clean, series = "Cleaned") +
+  labs(title = "Original vs Cleaned Time Series",
+       x = "Datetime", y = "Demand") +
+  scale_color_manual(values = c("Original" = "red", "Cleaned" = "blue")) +
+  theme_minimal()
+
+
+
+# Step 1: Create a dataframe with datetime and cleaned hourly demand
+df_hourly <- data.frame(
+  datetime = hourly_demand$datetime,
+  demand_clean = as.numeric(msts_demand_clean)
+)
+
+# Step 2: Extract date
+df_hourly <- df_hourly %>%
+  mutate(date = as.Date(datetime))
+
+# Step 3: Group by date and calculate daily average
+df_daily_avg <- df_hourly %>%
+  group_by(date) %>%
+  summarise(daily_avg_demand = mean(demand_clean, na.rm = TRUE))
+
+# Step 4: View result
+head(df_daily_avg)
+
+msts_daily_demand <- msts(df_daily_avg$daily_avg_demand,
+                      start = c(2005, 1),
+                      seasonal.periods = c(7, 365.25))
+
+
+```
+
+## Analyzing data
+
+2005: 365days 2006: 365days 2007: 365days 2008: 366days 2009: 365days 2010: 365days
+
+```{r}
+# Hourly Electricity Demand
+
+# ACF, PACF
+par(mfrow=c(1,2))
+ACF_Plot <- Acf(msts_demand_clean, lag = 40, plot = TRUE)
+PACF_Plot <- Pacf(msts_demand_clean, lag = 40)
+
+```
+
+# Creating a subset
+
+```{r}
+#create a subset for training purpose
+n_for = 17530
+
+msts_demand_train <- subset(msts_demand_clean,
+  end = length(msts_demand_clean)-n_for)
+
+#create a subset for testing purpose
+msts_demand_test <- subset(msts_demand_clean,
+                           start = length(msts_demand_clean)-n_for)
+
+
+autoplot(msts_demand_train)
+autoplot(msts_demand_test)
+
+
+```
+
+# Forecasting Hourly Electricity Demand
+
+# Model 1: STL + ETS(ts object)
+
+```{r}
+# Model 1: STL + ETS
+#Fit and forecast STL + ETS model to data
+ETS_fit <- stlf(msts_demand_train, h=n_for)
+#Plot foresting results
+autoplot(ETS_fit) + ylab("Hourly Electricity Demand")
+#Plot model + observed data
+autoplot(msts_demand) +
+  autolayer(ETS_fit, series="STL + ETS",PI=FALSE) +
+  ylab("Hourly Electricity Demand")
+
+plot(ETS_fit$residuals)
+checkresiduals(ETS_fit)
+acf(na.omit(ETS_fit$residuals), main = "ACF of Residuals")
+
+names(ETS_fit)
+length(ETS_fit$mean)
+
+accuracy(ETS_fit$mean, msts_demand_test)
+
+```
+
+# Forecasting Hourly Electricity Demand
+# model 1-1
+```{r}
+
+# Step 1: Fit ARIMA model with Fourier terms as external regressors
+ARIMA_Fourier_fit <- auto.arima(msts_demand_train, seasonal = FALSE,
+                                lambda=0,
+                               xreg =
+                                 fourier(msts_demand_train,
+                                         K = c(2, 2, 1))
+)
+
+
+# Step 2: Forecast using the fitted model
+ARIMA_Fourier_fc <- forecast(ARIMA_Fourier_fit, xreg =
+                                 fourier(msts_demand_train,
+                                         K = c(2, 2, 1),
+                                         h = n_for), h=n_for)
+
+# Step 3: Overlay forecast on full data
+autoplot(msts_demand) +
+  autolayer(ARIMA_Fourier_fc$mean, series = "ARIMA + Fourier", PI = FALSE) +
+  ylab("Hourly Electricity Demand")
+
+autoplot(ARIMA_Fourier_fc$mean)
+# Step 8: Plot residuals
+plot(ARIMA_Fourier_fc$residuals, main = "Residuals: ARIMA + Fourier")
+
+# Step 9: Residual diagnostics
+checkresiduals(ARIMA_Fourier_fc)
+acf(na.omit(ARIMA_Fourier_fc$residuals), main = "ACF of Residuals")
+
+# Step 10: Evaluate forecast accuracy
+accuracy(ARIMA_Fourier_fc$mean, msts_demand_test)
+
+
+```
+
+# model 1-2: fitting
+```{r}
+
+# Step 1: Fit ARIMA model with Fourier terms as external regressors
+ARIMA_Fourier_fit_2 <- auto.arima(msts_demand_train, seasonal = FALSE,
+                                lambda=0,
+                               xreg =
+                                 fourier(msts_demand_train,
+                                         K = c(4, 6, 12))
+)
+
+
+# Step 2: Forecast using the fitted model
+ARIMA_Fourier_fc_2 <- forecast(ARIMA_Fourier_fit_2, xreg =
+                                 fourier(msts_demand_train,
+                                         K = c(4, 6, 12),
+                                         h = n_for), h=n_for)
+
+# Step 3: Overlay forecast on full data
+autoplot(msts_demand) +
+  autolayer(ARIMA_Fourier_fc_2$mean, series = "ARIMA + Fourier", PI = FALSE) +
+  ylab("Hourly Electricity Demand")
+
+autoplot(ARIMA_Fourier_fc_2$mean)
+# Step 8: Plot residuals
+plot(ARIMA_Fourier_fc_2$residuals, main = "Residuals: ARIMA + Fourier")
+
+# Step 9: Residual diagnostics
+checkresiduals(ARIMA_Fourier_fc_2)
+acf(na.omit(ARIMA_Fourier_fc_2$residuals), main = "ACF of Residuals")
+
+# Step 10: Evaluate forecast accuracy
+accuracy(ARIMA_Fourier_fc_2$mean, msts_demand_test)
+
+
+```
+# model 1-3: forecasting
+```{r}
+
+# Step 1: Fit ARIMA model with Fourier terms as external regressors
+# ARIMA_Fourier_fit_3 <- auto.arima(msts_demand_clean, 
+#                                  seasonal = FALSE,
+#                                  lambda=0,
+#                                  xreg = fourier(msts_demand_clean,
+#                                         K = c(4, 6, 12))
+#)
+
+
+# Step 2: Forecast using the fitted model
+ARIMA_Fourier_fc_3 <- forecast(ARIMA_Fourier_fit_3, xreg =
+                                 fourier(msts_demand_clean,
+                                         K = c(4, 6, 12)), h=1416)
+
+# Step 3: Overlay forecast on full data
+autoplot(msts_demand) +
+  autolayer(ARIMA_Fourier_fc_3$mean, series = "ARIMA + Fourier", PI = FALSE) +
+  ylab("Hourly Electricity Demand")
+
+autoplot(ARIMA_Fourier_fc_3$mean)
+# Step 8: Plot residuals
+plot(ARIMA_Fourier_fit_3$residuals, main = "Residuals: ARIMA + Fourier")
+
+# Step 9: Residual diagnostics
+checkresiduals(ARIMA_Fourier_fc_3)
+acf(na.omit(ARIMA_Fourier_fc_3$residuals), main = "ACF of Residuals")
+
+
+
+
+# 1. Create hourly datetime starting from "2011-01-01 01:00:00"
+forecast_times <- seq(from = as.POSIXct("2011-01-01 01:00:00"),
+                      by = "hour",
+                      length.out = length(ARIMA_Fourier_fc_3$mean))
+
+# 2. Create dataframe with forecast values and datetime
+forecast_df <- data.frame(
+  datetime = forecast_times,
+  hourly_forecast = as.numeric(ARIMA_Fourier_fc_3$mean)
+)
+
+# 3. Extract date only
+forecast_df <- forecast_df %>%
+  mutate(date = as.Date(datetime))
+
+# 4. Compute daily average demand
+daily_avg_df <- forecast_df %>%
+  group_by(date) %>%
+  summarise(daily_avg_demand = mean(hourly_forecast, na.rm = TRUE))
+
+# 5. Save to Excel
+write_xlsx(daily_avg_df, "daily_forecast_average.xlsx")
+
+```
+# model 1-4: forecasting
+```{r}
+
+
+# Generate Fourier terms
+xreg_train <- fourier(msts_daily_demand, K = c(2, 5))
+
+# Fit ARIMA model with Fourier terms
+ARIMA_Fourier_fit_4 <- auto.arima(msts_daily_demand,
+                                  seasonal = FALSE,
+                                  lambda = 0,
+                                  xreg = xreg_train)
+
+# Step 2: Forecast using the fitted model (for daily data)
+n_forecast_days <- 59  # or however many days you want to forecast
+
+# Generate future Fourier terms
+xreg_future <- fourier(msts_daily_demand, K = c(2, 5), h = n_forecast_days)
+
+# Forecast
+ARIMA_Fourier_fc_4 <- forecast(ARIMA_Fourier_fit_4,
+                               xreg = xreg_future,
+                               h = n_forecast_days)
+
+# Step 3: Plot full forecast result
+autoplot(ARIMA_Fourier_fc_4) +
+  ylab("Daily Electricity Demand") +
+  ggtitle("Forecast: ARIMA + Fourier (Daily)")
+
+# Step 4: Plot residuals
+plot(ARIMA_Fourier_fit_4$residuals, main = "Residuals: ARIMA + Fourier")
+
+# Step 5: Residual diagnostics
+checkresiduals(ARIMA_Fourier_fit_4)
+acf(na.omit(ARIMA_Fourier_fit_4$residuals), main = "ACF of Residuals")
+
+
+# 1. Create forecast date sequence starting from the day after the last observation
+start_date <- as.Date(tail(df_daily_avg$date, 1)) + 1
+
+# 2. Generate corresponding date vector
+forecast_dates <- seq.Date(from = start_date,
+                           by = "day",
+                           length.out = n_forecast_days)
+
+# 3. Create result dataframe
+daily_forecast_df <- data.frame(
+  date = forecast_dates,
+  forecast_demand = as.numeric(ARIMA_Fourier_fc_4$mean)
+)
+
+# 4. Save to Excel
+write_xlsx(daily_forecast_df, "daily_forecast_average.xlsx")
+
+
+```
+
+
+# Forecasting with Neural Network methods
+Model 2-1
+```{r}
+
+# Step 1: Generate Fourier terms for training set
+xreg_train <- fourier(msts_daily_demand, K = c(2, 5))
+
+# Step 2: Fit Neural Network Time Series Model with Fourier terms
+NN_fit <- nnetar(msts_daily_demand,
+                 p = 1,
+                 P = 0,
+                 xreg = xreg_train,
+                 lambda = 0)  # Box-Cox transform if needed
+
+
+# Forecast horizon
+n_forecast_days <- 59
+
+# Generate future Fourier terms
+xreg_future <- fourier(msts_daily_demand, K = c(2, 5), h = n_forecast_days)
+
+# Forecast using the neural network model
+NN_fc <- forecast(NN_fit,
+                  xreg = xreg_future,
+                  h = n_forecast_days)
+autoplot(NN_fc) +
+  ylab("Daily Electricity Demand") +
+  ggtitle("Forecast: Neural Network + Fourier (Daily)")
+plot(NN_fit$residuals, main = "Residuals: Neural Network + Fourier")
+
+acf(na.omit(NN_fit$residuals), main = "ACF of Residuals")
+# Create date sequence for forecast horizon
+start_date <- as.Date(tail(df_daily_avg$date, 1)) + 1
+forecast_dates <- seq.Date(from = start_date,
+                           by = "day",
+                           length.out = n_forecast_days)
+
+# Create output dataframe
+daily_forecast_df <- data.frame(
+  date = forecast_dates,
+  forecast_demand = as.numeric(NN_fc$mean)
+)
+
+# Save to Excel
+write_xlsx(daily_forecast_df, "daily_forecast_nnetar_fourier.xlsx")
+
+```
+Model 2-2
+```{r}
+
+# Step 1: Generate Fourier terms for training set
+xreg_train <- fourier(msts_daily_demand, K = c(2, 4))
+
+# Step 2: Fit Neural Network Time Series Model with Fourier terms
+NN_fit <- nnetar(msts_daily_demand,
+                 p = 1,
+                 P = 0,
+                 xreg = xreg_train,
+                 lambda = 0)  # Box-Cox transform if needed
+
+
+# Forecast horizon
+n_forecast_days <- 59
+
+# Generate future Fourier terms
+xreg_future <- fourier(msts_daily_demand, K = c(2, 4), h = n_forecast_days)
+
+# Forecast using the neural network model
+NN_fc <- forecast(NN_fit,
+                  xreg = xreg_future,
+                  h = n_forecast_days)
+autoplot(NN_fc) +
+  ylab("Daily Electricity Demand") +
+  ggtitle("Forecast: Neural Network + Fourier (Daily)")
+plot(NN_fit$residuals, main = "Residuals: Neural Network + Fourier")
+
+acf(na.omit(NN_fit$residuals), main = "ACF of Residuals")
+# Create date sequence for forecast horizon
+start_date <- as.Date(tail(df_daily_avg$date, 1)) + 1
+forecast_dates <- seq.Date(from = start_date,
+                           by = "day",
+                           length.out = n_forecast_days)
+
+# Create output dataframe
+daily_forecast_df <- data.frame(
+  date = forecast_dates,
+  forecast_demand = as.numeric(NN_fc$mean)
+)
+
+# Save to Excel
+write_xlsx(daily_forecast_df, "daily_forecast_nnetar_fourier_2-2.xlsx")
+
+```
+```{r}
+# Model 3: TBATS (Daily)
+
+
+# Step 1: Fit TBATS model to daily data
+tbats_fit <- tbats(msts_daily_demand)
+
+# Step 2: Forecast
+n_forecast_days <- 59
+tbats_fc <- forecast(tbats_fit, h = n_forecast_days)
+
+# Step 3: Plot forecast
+autoplot(tbats_fc) +
+  ylab("Daily Electricity Demand") +
+  ggtitle("Forecast: TBATS Model (Daily)")
+
+# Step 4: Plot residuals
+# plot(tbats_fit$residuals, main = "Residuals: TBATS")
+# acf(na.omit(tbats_fit$residuals), main = "ACF of Residuals")
+
+# Step 5: Create forecast date sequence
+start_date <- as.Date(tail(df_daily_avg$date, 1)) + 1
+forecast_dates <- seq.Date(from = start_date,
+                           by = "day",
+                           length.out = n_forecast_days)
+
+# Step 6: Create output dataframe
+daily_forecast_df <- data.frame(
+  date = forecast_dates,
+  forecast_demand = as.numeric(tbats_fc$mean)
+)
+
+# Step 7: Save to Excel
+write_xlsx(daily_forecast_df, "daily_forecast_tbats_model3.xlsx")
+
+```
+
+
+```{r}
+# Model 4: STL + ETS (Daily)
+
+
+# Step 1: Fit and forecast with STL + ETS
+n_forecast_days <- 59
+stlf_fc <- stlf(msts_daily_demand,
+                h = n_forecast_days,
+                lambda = 0,
+                s.window = 14,
+                robust = TRUE)
+
+
+
+# Step 2: Plot forecast
+autoplot(stlf_fc) +
+  ylab("Daily Electricity Demand") +
+  ggtitle("Forecast: STL + ETS (Daily)")
+
+# Step 3: Plot residuals
+plot(stlf_fc$residuals, main = "Residuals: STL + ETS")
+acf(na.omit(stlf_fc$residuals), main = "ACF of Residuals")
+
+# Step 4: Create forecast date sequence
+start_date <- as.Date(tail(df_daily_avg$date, 1)) + 1
+forecast_dates <- seq.Date(from = start_date,
+                           by = "day",
+                           length.out = n_forecast_days)
+
+# Step 5: Create output dataframe
+daily_forecast_df <- data.frame(
+  date = forecast_dates,
+  forecast_demand = as.numeric(stlf_fc$mean)
+)
+
+# Step 6: Save to Excel
+write_xlsx(daily_forecast_df, "daily_forecast_stl_ets_model4.xlsx")
+
+```
+```{r}
+# Model 5: BSM (Basic Structural Model for daily data)
+
+# Step 1: Fit the BSM model (trend + seasonal + irregular)
+bsm_fit <- StructTS(msts_daily_demand, type = "BSM")
+
+# Step 2: Forecast
+n_forecast_days <- 59
+bsm_fc <- forecast(bsm_fit, h = n_forecast_days)
+
+# Step 3: Plot forecast
+autoplot(bsm_fc) +
+  ylab("Daily Electricity Demand") +
+  ggtitle("Forecast: Basic Structural Model (BSM)")
+
+# Step 4: Plot residuals
+plot(bsm_fit$residuals, main = "Residuals: BSM")
+acf(na.omit(bsm_fit$residuals), main = "ACF of Residuals")
+checkresiduals(bsm_fc)
+
+# Create forecast date sequence
+start_date <- as.Date(tail(df_daily_avg$date, 1)) + 1
+forecast_dates <- seq.Date(from = start_date,
+                           by = "day",
+                           length.out = n_forecast_days)
+
+# Output forecast dataframe
+daily_forecast_df <- data.frame(
+  date = forecast_dates,
+  forecast_demand = as.numeric(bsm_fc$mean)
+)
+
+# Save to Excel
+write_xlsx(daily_forecast_df, "daily_forecast_bsm_model5.xlsx")
+
+
+```
+
