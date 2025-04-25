@@ -1,0 +1,1570 @@
+---
+title: "Electricity Demand Forecast"
+author: "Ananya Aggarwal_Jisup Kwak"
+date: "2025-03-28"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+## Setting R code chunk options
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,tidy.opts=list(width.cutoff=80), tidy=FALSE)
+```
+
+## Loading packages and initializing
+```{r package, message=FALSE}
+library(readxl)
+library(lubridate)
+library(ggplot2)
+library(forecast)  
+library(Kendall)
+library(tseries)
+library(outliers)
+library(tidyverse)
+library(smooth)
+library(tidyr)
+library(dplyr)
+library(imputeTS)
+library(kableExtra)
+library(writexl)
+
+```
+
+## Importing data
+
+Hourly Electricity Demand, Temperature, Humidity from 01-01-2005 to 12-31-2010.
+
+```{r}
+# Organizing data of Electricity Demand
+original_hourly_demand <- read_excel(path = "../Data/load.xlsx", skip = 0, sheet = "Sheet1", col_names = TRUE)
+original_hourly_demand <- original_hourly_demand[ , -1]
+
+
+hourly_demand <- original_hourly_demand %>%
+  pivot_longer(
+    cols = starts_with("h"),
+    names_to = "hour",
+    values_to = "demand"
+  )
+
+hourly_demand <- hourly_demand %>%
+  mutate(hour = as.integer(sub("h", "", hour)) - 1)
+
+hourly_demand <- hourly_demand %>%
+  mutate(
+    datetime = ymd(date) + hours(hour)
+  ) %>%
+  select(datetime, demand) %>%
+  arrange(datetime)
+
+
+ggplot(hourly_demand, aes(x = datetime, y = demand)) +
+  geom_line(color = "steelblue") +
+  labs(
+    title = "Hourly Electricity Demand",
+    x = "Datetime",
+    y = "Demand (MW)"
+  ) +
+  theme_minimal()
+
+
+
+```
+# Cleaning data
+
+```{r}
+# Check NAs
+summary(hourly_demand)
+msts_demand_original <- msts(hourly_demand$demand,
+                    seasonal.periods =c(24,168,8766),
+                    start=c(2005,01,01))
+
+
+# Check missing months
+hourly_demand$datetime <- as.POSIXct(hourly_demand$datetime)
+full_time <- seq(from = min(hourly_demand$datetime, na.rm = TRUE),
+                 to   = max(hourly_demand$datetime, na.rm = TRUE),
+                 by   = "hour")
+missing_times <- setdiff(full_time, hourly_demand$datetime)
+# Display the missing timestamps
+missing_times
+hourly_demand$datetime[which(hourly_demand$demand == 0)]
+hourly_demand$datetime[which(is.na(hourly_demand$demand))]
+# Replace 0 values in the demand column with NA
+hourly_demand$demand[hourly_demand$demand < 1500] <- NA
+
+
+# msts time series
+msts_demand_nas <- msts(hourly_demand$demand,
+                    seasonal.periods =c(24,168,8766),
+                    start=c(2005,01,01))
+head(msts_demand_nas)
+autoplot(msts_demand_nas)
+
+# TS clean
+head(msts_demand_nas)
+msts_demand_clean <- na.interp(msts_demand_nas)
+summary(msts_demand_nas)
+summary(msts_demand_clean)
+
+# Plot the cleaned time series
+autoplot(msts_demand_original, series = "Original") +
+  autolayer(msts_demand_clean, series = "Cleaned") +
+  labs(title = "Original vs Cleaned Time Series",
+       x = "Datetime", y = "Demand") +
+  scale_color_manual(values = c("Original" = "red", "Cleaned" = "blue")) +
+  theme_minimal()
+
+
+
+# Cleaned hourly demand --> Cleaned Daily Demand
+df_hourly <- data.frame(
+  datetime = hourly_demand$datetime,
+  demand_clean = as.numeric(msts_demand_clean)
+)
+
+df_hourly <- df_hourly %>%
+  mutate(date = as.Date(datetime))
+
+df_daily_avg <- df_hourly %>%
+  group_by(date) %>%
+  summarise(daily_avg_demand = mean(demand_clean, na.rm = TRUE))
+
+head(df_daily_avg)
+
+msts_daily_demand <- msts(df_daily_avg$daily_avg_demand,
+                      start = c(2005, 1),
+                      seasonal.periods = c(7, 365.25))
+
+
+```
+
+## Analyzing data
+
+2005: 365days 2006: 365days 2007: 365days 2008: 366days 2009: 365days 2010: 365days
+
+```{r}
+# Hourly Electricity Demand
+
+# ACF, PACF
+par(mfrow=c(1,2))
+ACF_Plot <- Acf(msts_demand_clean, lag = 40, plot = TRUE)
+PACF_Plot <- Pacf(msts_demand_clean, lag = 40)
+
+```
+
+# Creating a subset
+
+```{r}
+#create a subset for training purpose
+n_for = 17530
+
+msts_demand_train <- subset(msts_demand_clean,
+  end = length(msts_demand_clean)-n_for)
+
+#create a subset for testing purpose
+msts_demand_test <- subset(msts_demand_clean,
+                           start = length(msts_demand_clean)-n_for)
+
+
+autoplot(msts_demand_train)
+autoplot(msts_demand_test)
+
+
+```
+
+# Forecasting Hourly Electricity Demand
+
+# model 1-3: Forecast with hourly demand
+```{r}
+
+# Step 1: Fit ARIMA model with Fourier terms
+ARIMA_Fourier_fit_3 <- auto.arima(msts_demand_clean, 
+                                  seasonal = FALSE,
+                                  lambda=0,
+                                  xreg = fourier(msts_demand_clean,
+                                         K = c(4, 6, 12))
+                                  )
+
+
+# Step 2: Forecast using the fitted model
+ARIMA_Fourier_fc_3 <- forecast(ARIMA_Fourier_fit_3, xreg =
+                                 fourier(msts_demand_clean,
+                                         K = c(4, 6, 12)), h=1416)
+
+# Step 3: Overlay forecast on full data
+autoplot(msts_demand_clean) +
+  autolayer(ARIMA_Fourier_fc_3$mean, series = "ARIMA + Fourier", PI = FALSE) +
+  ylab("Hourly Electricity Demand")
+
+autoplot(ARIMA_Fourier_fc_3$mean)
+
+
+# Plot
+plot(ARIMA_Fourier_fit_3$residuals, main = "Residuals: ARIMA + Fourier")
+
+# Residual diagnostics
+checkresiduals(ARIMA_Fourier_fc_3)
+acf(na.omit(ARIMA_Fourier_fc_3$residuals), main = "ACF of Residuals")
+
+# Compute daily average demand
+forecast_times <- seq(from = as.POSIXct("2011-01-01 01:00:00"),
+                      by = "hour",
+                      length.out = length(ARIMA_Fourier_fc_3$mean))
+
+forecast_df <- data.frame(
+  datetime = forecast_times,
+  hourly_forecast = as.numeric(ARIMA_Fourier_fc_3$mean)
+)
+
+forecast_df <- forecast_df %>%
+  mutate(date = as.Date(datetime))
+
+
+daily_avg_df <- forecast_df %>%
+  group_by(date) %>%
+  summarise(daily_avg_demand = mean(hourly_forecast, na.rm = TRUE))
+
+# Save to Excel
+write_xlsx(daily_avg_df, "daily_forecast_average.xlsx")
+
+```
+# model 1-4: Forecast with Daily Demand
+```{r}
+
+# Fit ARIMA model with Fourier terms
+ARIMA_Fourier_fit_4 <- auto.arima(msts_daily_demand,
+                                  seasonal = FALSE,
+                                  lambda = 0,
+                                  xreg = fourier(msts_daily_demand, K = c(2, 5)))
+
+# Forecast
+ARIMA_Fourier_fc_4 <- forecast(ARIMA_Fourier_fit_4,
+                               xreg =  fourier(msts_daily_demand, 
+                                               K = c(2, 5), h = 59),
+                               h = 59)
+
+# Plot forecast result
+autoplot(ARIMA_Fourier_fc_4) +
+  ylab("Daily Electricity Demand") +
+  ggtitle("Forecast: ARIMA + Fourier (Daily)")
+
+# Plot residuals
+plot(ARIMA_Fourier_fit_4$residuals, main = "Residuals: ARIMA + Fourier")
+
+# Residual diagnostics
+checkresiduals(ARIMA_Fourier_fit_4)
+acf(na.omit(ARIMA_Fourier_fit_4$residuals), main = "ACF of Residuals")
+
+
+# Save to Excel
+start_date <- as.Date(tail(df_daily_avg$date, 1)) + 1
+forecast_dates <- seq.Date(from = start_date,
+                           by = "day",
+                           length.out = 59)
+daily_forecast_df <- data.frame(
+  date = forecast_dates,
+  forecast_demand = as.numeric(ARIMA_Fourier_fc_4$mean)
+)
+write_xlsx(daily_forecast_df, "daily_forecast_average.xlsx")
+
+
+```
+
+
+# Forecasting with Neural Network methods(Daily demand)
+Model 2-1
+```{r}
+
+# NN with Fourier terms
+xreg_train <- fourier(msts_daily_demand, K = c(2, 5))
+NN_fit <- nnetar(msts_daily_demand,
+                 p = 1,
+                 P = 0,
+                 xreg = xreg_train,
+                 lambda = 0)
+
+# Forecast horizon
+n_forecast_days <- 59
+
+# Generate future Fourier terms
+xreg_future <- fourier(msts_daily_demand, K = c(2, 5), h = n_forecast_days)
+
+# Forecast using the neural network model
+NN_fc <- forecast(NN_fit,
+                  xreg = xreg_future,
+                  h = n_forecast_days)
+autoplot(NN_fc) +
+  ylab("Daily Electricity Demand") +
+  ggtitle("Forecast: Neural Network + Fourier (Daily)")
+plot(NN_fit$residuals, main = "Residuals: Neural Network + Fourier")
+
+acf(na.omit(NN_fit$residuals), main = "ACF of Residuals")
+# Create date sequence for forecast horizon
+start_date <- as.Date(tail(df_daily_avg$date, 1)) + 1
+forecast_dates <- seq.Date(from = start_date,
+                           by = "day",
+                           length.out = n_forecast_days)
+
+# Create output dataframe
+daily_forecast_df <- data.frame(
+  date = forecast_dates,
+  forecast_demand = as.numeric(NN_fc$mean)
+)
+
+# Save to Excel
+write_xlsx(daily_forecast_df, "daily_forecast_nnetar_fourier_2-1.xlsx")
+
+```
+Model 2-2
+```{r}
+
+# NN with Fourier terms
+xreg_train <- fourier(msts_daily_demand, K = c(2, 4))
+NN_fit <- nnetar(msts_daily_demand,
+                 p = 1,
+                 P = 0,
+                 xreg = xreg_train,
+                 lambda = 0)  # Box-Cox transform if needed
+
+
+# Forecast horizon
+n_forecast_days <- 59
+
+# Generate future Fourier terms
+xreg_future <- fourier(msts_daily_demand, K = c(2, 4), h = n_forecast_days)
+
+# Forecast using the neural network model
+NN_fc <- forecast(NN_fit,
+                  xreg = xreg_future,
+                  h = n_forecast_days)
+autoplot(NN_fc) +
+  ylab("Daily Electricity Demand") +
+  ggtitle("Forecast: Neural Network + Fourier (Daily)")
+plot(NN_fit$residuals, main = "Residuals: Neural Network + Fourier")
+
+acf(na.omit(NN_fit$residuals), main = "ACF of Residuals")
+# Create date sequence for forecast horizon
+start_date <- as.Date(tail(df_daily_avg$date, 1)) + 1
+forecast_dates <- seq.Date(from = start_date,
+                           by = "day",
+                           length.out = n_forecast_days)
+
+# Create output dataframe
+daily_forecast_df <- data.frame(
+  date = forecast_dates,
+  forecast_demand = as.numeric(NN_fc$mean)
+)
+
+# Save to Excel
+write_xlsx(daily_forecast_df, "daily_forecast_nnetar_fourier_2-2.xlsx")
+
+```
+Model 2-3
+```{r}
+
+autoplot(msts_daily_demand)
+
+
+# NN with Fourier terms
+xreg_train <- fourier(msts_daily_demand, K = c(2, 4))
+
+NN_fit <- nnetar(msts_daily_demand,
+                 p = 1,
+                 P = 0,
+                 xreg = xreg_train,
+                 lambda = NULL)  # Box-Cox transform if needed
+
+
+# Forecast horizon
+n_forecast_days <- 59
+
+# Generate future Fourier terms
+xreg_future <- fourier(msts_daily_demand, K = c(2, 4), h = n_forecast_days)
+
+# Forecast using the neural network model
+NN_fc <- forecast(NN_fit,
+                  xreg = xreg_future,
+                  h = n_forecast_days)
+autoplot(NN_fc) +
+  ylab("Daily Electricity Demand") +
+  ggtitle("Forecast: Neural Network + Fourier (Daily)")
+plot(NN_fit$residuals, main = "Residuals: Neural Network + Fourier")
+
+acf(na.omit(NN_fit$residuals), main = "ACF of Residuals")
+# Create date sequence for forecast horizon
+start_date <- as.Date(tail(df_daily_avg$date, 1)) + 1
+forecast_dates <- seq.Date(from = start_date,
+                           by = "day",
+                           length.out = n_forecast_days)
+
+# Create output dataframe
+daily_forecast_df <- data.frame(
+  date = forecast_dates,
+  forecast_demand = as.numeric(NN_fc$mean)
+)
+
+# Save to Excel
+write_xlsx(daily_forecast_df, "daily_forecast_nnetar_fourier_2-3.xlsx")
+
+```
+
+Taking a hybrid of the ARIMA and NN models
+
+```{r}
+
+# Combine forecasts from ARIMA+Fourier and NN+Fourier
+
+# Step 1: Ensure both forecast objects are available
+fc_arima <- ARIMA_Fourier_fc_4$mean  # From ARIMA + Fourier
+fc_nn <- NN_fc$mean                  # From Neural Net + Fourier
+
+# Step 2: Hybrid forecast by simple averaging
+hybrid_fc <- 0.5 * fc_arima + 0.5 * fc_nn
+
+# Step 3: Plot the hybrid forecast along with components
+autoplot(msts_daily_demand) +
+  autolayer(fc_arima, series = "ARIMA + Fourier") +
+  autolayer(fc_nn, series = "NN + Fourier") +
+  autolayer(hybrid_fc, series = "Hybrid Forecast", size = 1.2) +
+  labs(title = "Hybrid Forecast: ARIMA + NN (Fourier)", y = "Daily Electricity Demand") +
+  theme_minimal()
+
+# Step 5: Create date sequence for forecast horizon
+start_date <- as.Date(tail(df_daily_avg$date, 1)) + 1
+forecast_dates <- seq.Date(from = start_date, by = "day", length.out = n_forecast_days)
+
+# Step 6: Create output dataframe for the forecasted demand
+daily_forecast_df <- data.frame(
+  date = forecast_dates,
+  forecast_demand = as.numeric(hybrid_fc)
+)
+
+# Save the forecast to CSV if needed
+write.csv(daily_forecast_df, "final_hybrid_forecast.csv", row.names = FALSE)
+
+```
+
+
+
+Adding in temperature data
+
+```{r}
+# Load temperature
+temperature_raw <- read_excel("../Data/temperature.xlsx")
+temp_avg <- temperature_raw %>%
+  mutate(datetime = ymd(date) + hours(hr - 1)) %>%
+  mutate(mean_temp = rowMeans(select(., starts_with("t_ws")), na.rm = TRUE)) %>%
+  select(datetime, mean_temp)
+
+# Merge temperature data with hourly demand data
+demand_temp <- df_hourly %>%
+  left_join(temp_avg, by = "datetime")
+
+# Drop rows where demand was NA or where temp is NA
+demand_temp <- demand_temp %>%
+  filter(!is.na(demand_clean) & !is.na(mean_temp))
+
+# Check if there are any missing values after merging
+summary(demand_temp)
+
+# Visualize the hourly temperature and demand to understand their relationship
+ggplot(demand_temp, aes(x = datetime)) +
+  geom_line(aes(y = demand_clean), color = "blue") +
+  geom_line(aes(y = mean_temp * 50), color = "red") +  # Scale temperature for visibility
+  labs(title = "Hourly Electricity Demand and Temperature",
+       x = "Datetime",
+       y = "Demand (MW) / Temperature (scaled)") +
+  scale_y_continuous(
+    name = "Demand (MW)",
+    sec.axis = sec_axis(~ . / 50, name = "Temperature (°C)")
+  ) +
+  theme_minimal()
+
+
+```
+
+Correlation Analysis
+
+```{r}
+
+# Pearson
+cor(demand_temp$demand_clean, demand_temp$mean_temp, method = "pearson")
+
+# Kendall
+cor(demand_temp$demand_clean, demand_temp$mean_temp, method = "kendall")
+
+# Spearman
+cor(demand_temp$demand_clean, demand_temp$mean_temp, method = "spearman")
+
+# Visualization
+ggplot(demand_temp, aes(x = mean_temp, y = demand_clean)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "lm", color = "blue") +
+  labs(title = "Demand vs Temperature", x = "Mean Temperature", y = "Hourly Demand (MW)") +
+  theme_minimal()
+
+```
+
+Adding temperature as regressor in the final NN+Fourier model
+
+```{r}
+
+# Create daily temperature series
+temp_daily_avg <- demand_temp %>%
+  mutate(date = as.Date(datetime)) %>%
+  group_by(date) %>%
+  summarise(daily_mean_temp = mean(mean_temp, na.rm = TRUE))
+
+# Merge with daily demand
+daily_model_df <- df_daily_avg %>%
+  left_join(temp_daily_avg, by = "date")
+
+# Create time series objects
+daily_demand_msts <- msts(daily_model_df$daily_avg_demand, seasonal.periods = c(7, 365.25), start = c(2005, 1))
+daily_temp_msts <- msts(daily_model_df$daily_mean_temp, seasonal.periods = c(7, 365.25), start = c(2005, 1))
+
+# Fourier terms
+fourier_terms <- fourier(daily_demand_msts, K = c(2, 4))
+
+# Combine Fourier + Temperature as regressors
+xreg_combined <- cbind(fourier_terms, temp = as.numeric(daily_temp_ts))
+
+# Fit Neural Network model
+NN_combined_fit <- nnetar(daily_demand_ts,
+                          p = 1,
+                          P = 0,
+                          xreg = xreg_combined,
+                          lambda = NULL)
+
+# Forecast horizon
+n_forecast_days <- 59
+future_fourier <- fourier(daily_demand_msts, K = c(2, 4), h = n_forecast_days)
+
+# For future temperature, you could use:
+# - Persistence (last value repeated)
+# - Historical avg for that day
+# - Another forecast model
+# Here we'll use the last available temp value for simplicity:
+future_temp <- rep(tail(daily_temp_msts, 1), n_forecast_days)
+
+# Future regressors
+xreg_future_combined <- cbind(future_fourier, temp = future_temp)
+
+# Forecast
+NN_combined_fc <- forecast(NN_combined_fit,
+                           xreg = xreg_future_combined,
+                           h = n_forecast_days)
+
+# Plot
+autoplot(NN_combined_fc) +
+  ylab("Daily Electricity Demand") +
+  ggtitle("Forecast: Neural Network + Fourier + Temperature (Daily)")
+
+# Plot residuals
+plot(NN_combined_fc$residuals, main = "Residuals: NN + Fourier + Temperature")
+
+# Residual diagnostics
+checkresiduals(NN_combined_fc)
+acf(na.omit(NN_combined_fc$residuals), main = "ACF of Residuals")
+
+# Save the forecast to Excel
+forecast_dates <- seq.Date(from = as.Date(tail(daily_model_df$date, 1)) + 1,
+                           by = "day",
+                           length.out = n_forecast_days)
+
+daily_forecast_df <- data.frame(
+  date = forecast_dates,
+  load = as.numeric(NN_combined_fc$mean)
+)
+
+# Save to CSV
+write.csv(daily_forecast_df, "final_forecast_NNfourier_temp.csv", row.names = FALSE)
+
+```
+
+
+```{r}
+
+# Create Fourier terms for demand
+fourier_terms <- fourier(daily_demand_msts, K = c(2, 4))
+
+# Create polynomial terms for temperature to capture nonlinearity
+daily_model_df <- daily_model_df %>%
+  mutate(
+    temp_poly_2 = daily_mean_temp^2,
+    temp_poly_3 = daily_mean_temp^3,
+  )
+
+# Combine Fourier terms for demand and polynomial terms for temperature
+xreg_combined <- cbind(fourier_terms, 
+                       temp_poly_2 = daily_model_df$temp_poly_2,
+                       temp_poly_3 = daily_model_df$temp_poly_3)
+
+# Fit Neural Network model with the combined regressors (Fourier + polynomial terms for temperature)
+NN_combined_fit <- nnetar(daily_demand_msts,
+                          p = 1,
+                          P = 0,
+                          xreg = xreg_combined,
+                          lambda = NULL)
+
+# Forecast horizon
+n_forecast_days <- 59
+future_fourier <- fourier(daily_demand_msts, K = c(2, 4), h = n_forecast_days)
+
+# For future temperature, we will use the same approach as before (persistence, i.e., last available value)
+future_temp <- rep(tail(daily_temp_msts, 1), n_forecast_days)
+
+# Future polynomial terms for temperature
+future_temp_poly_2 <- future_temp^2
+future_temp_poly_3 <- future_temp^3
+
+# Combine future Fourier terms and future temperature features (polynomial terms)
+xreg_future_combined <- cbind(future_fourier, 
+                               temp_poly_2 = future_temp_poly_2,
+                              temp_poly_3 = future_temp_poly_3)
+
+# Forecast using the neural network model with future regressors
+NN_combined_fc <- forecast(NN_combined_fit,
+                           xreg = xreg_future_combined,
+                           h = n_forecast_days)
+
+# Plot the forecast
+autoplot(NN_combined_fc) +
+  ylab("Daily Electricity Demand") +
+  ggtitle("Forecast: Neural Network + Fourier + Nonlinear Temperature Effects")
+
+# Plot residuals
+plot(NN_combined_fc$residuals, main = "Residuals: NN + Fourier + Temperature")
+
+# Residual diagnostics
+checkresiduals(NN_combined_fc)
+acf(na.omit(NN_combined_fc$residuals), main = "ACF of Residuals")
+
+# Save the forecast to Excel
+forecast_dates <- seq.Date(from = as.Date(tail(daily_model_df$date, 1)) + 1,
+                           by = "day",
+                           length.out = n_forecast_days)
+
+daily_forecast_df <- data.frame(
+  date = forecast_dates,
+  load = as.numeric(NN_combined_fc$mean)
+)
+
+# Save to CSV
+write.csv(daily_forecast_df, "final_forecast_NNfourier_poly_temp.csv", row.names = FALSE)
+
+
+
+```
+
+
+```{r}
+
+# Fit TBATS model with temperature as a regressor
+model_tbats <- tbats(daily_demand_msts, 
+                     xreg = daily_temp_msts)  # Use daily temperature as a regressor
+
+# Forecast horizon (e.g., 59 days)
+n_forecast_days <- 59
+
+# Forecast using the TBATS model
+forecast_tbats <- forecast(model_tbats, h = n_forecast_days, xreg = rep(tail(daily_temp_msts, 1), n_forecast_days))
+
+# Plot the forecasted results
+autoplot(forecast_tbats) +
+  ylab("Daily Electricity Demand") +
+  ggtitle("Forecast: TBATS with Temperature as a Regressor")
+
+# Residual diagnostics
+checkresiduals(model_tbats)
+
+```
+
+
+NN+Fourier 2_2 model using training and testing data
+
+```{r}
+
+# Step 1: Create the training and validation sets
+train_data <- df_daily_avg %>% filter(date >= "2005-01-01" & date <= "2009-12-31")
+test_data <- df_daily_avg %>% filter(date >= "2010-01-01" & date <= "2010-02-28")
+
+# Create msts for training data (2005-2009)
+msts_demand_train <- msts(train_data$daily_avg_demand, seasonal.periods = c(7, 365.25))
+
+# Create msts for testing data (2010 Jan-Feb)
+msts_demand_test <- msts(test_data$daily_avg_demand, seasonal.periods = c(7, 365.25))
+
+# Step 2: Generate Fourier terms for training data
+xreg_train <- fourier(msts_demand_train, K = c(2, 4))
+
+# Step 3: Fit Neural Network model
+NN_fit <- nnetar(msts_demand_train,
+                 p = 1,
+                 P = 0,
+                 xreg = xreg_train,
+                 lambda = 0)  # Box-Cox transform if needed
+
+# Step 4: Generate Fourier terms for testing data (Jan-Feb 2010)
+xreg_test <- fourier(msts_demand_test, K = c(2, 4))
+
+# Step 5: Forecast using the trained NN model for the testing period (Jan-Feb 2010)
+NN_fc_test <- forecast(NN_fit,
+                       xreg = xreg_test,
+                       h = length(msts_demand_test))
+
+# Step 6: Ensure forecast dates match the actual test dates
+forecast_dates <- test_data$date
+
+# Step 7: Calculate RMSE for the test period (Jan-Feb 2010)
+rmse <- sqrt(mean((NN_fc_test$mean - test_data$daily_avg_demand)^2))
+print(paste("RMSE: ", rmse))
+
+# Step 8: Visualize the forecasted and actual values for Jan-Feb 2010
+library(ggplot2)
+
+# Combine actual and forecast data for plotting
+plot_data <- data.frame(
+  date = c(train_data$date, forecast_dates),
+  demand = c(train_data$daily_avg_demand, NN_fc_test$mean),
+  type = c(rep("Actual", length(train_data$date)), rep("Forecast", length(forecast_dates)))
+)
+
+# Plot the actual vs forecasted data
+ggplot(plot_data, aes(x = date, y = demand, color = type)) +
+  geom_line() +
+  scale_color_manual(values = c("Actual" = "blue", "Forecast" = "red")) +
+  ylab("Daily Electricity Demand") +
+  ggtitle("Actual vs Forecasted Daily Demand (Jan-Feb 2010)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Step 9: Re-train the model on the full dataset (2005-2010)
+full_data <- df_daily_avg %>% filter(date >= "2005-01-01" & date <= "2010-12-31")
+msts_demand_full <- msts(full_data$daily_avg_demand, seasonal.periods = c(7, 365.25))
+
+# Generate Fourier terms for the full training data
+xreg_full <- fourier(msts_demand_full, K = c(2, 4))
+
+# Re-train the NN model with the full dataset (2005-2010)
+NN_fit_full <- nnetar(msts_demand_full,
+                      p = 1,
+                      P = 0,
+                      xreg = xreg_full,
+                      lambda = 0)
+
+# Step 10: Forecast for Jan-Feb 2011 using the re-trained model
+n_forecast_days <- 59
+xreg_future <- fourier(msts_demand_full, K = c(2, 4), h = n_forecast_days)
+
+# Forecast for Jan-Feb 2011
+NN_fc_2011 <- forecast(NN_fit_full,
+                       xreg = xreg_future,
+                       h = n_forecast_days)
+
+# Step 11: Plot the forecast for Jan-Feb 2011
+forecast_dates_2011 <- seq.Date(from = as.Date("2011-01-01"), by = "day", length.out = n_forecast_days)
+
+# Combine the forecasted values for Jan-Feb 2011 into a data frame for plotting
+forecast_2011_df <- data.frame(
+  date = forecast_dates_2011,
+  forecast_demand = as.numeric(NN_fc_2011$mean)
+)
+
+# Plot the forecasted values for Jan-Feb 2011
+ggplot() +
+  geom_line(data = forecast_2011_df, aes(x = date, y = forecast_demand), color = "red", size = 1) +
+  ylab("Daily Electricity Demand") +
+  ggtitle("Forecast for Jan-Feb 2011 (Re-trained Model)") +
+  theme_minimal()
+
+# Residual diagnostics
+checkresiduals(NN_fc_2011)
+acf(na.omit(NN_fc_2011$residuals), main = "ACF of Residuals")
+
+# Save to CSV
+write.csv(forecast_2011_df, "final_forecast_NNfourier_train.csv", row.names = FALSE)
+
+```
+
+NN+Fourier 2_2 model using training and testing data, with temperature
+
+```{r}
+
+# Load necessary libraries
+library(forecast)
+library(ggplot2)
+library(dplyr)
+
+# Step 1: Create the training and validation sets
+train_data <- df_daily_avg %>% filter(date >= "2005-01-01" & date <= "2009-12-31")
+test_data <- df_daily_avg %>% filter(date >= "2010-01-01" & date <= "2010-02-28")
+
+# Step 2: Create msts for demand and temperature data (train and test)
+msts_demand_train <- msts(train_data$daily_avg_demand, seasonal.periods = c(7, 365.25))
+msts_demand_test <- msts(test_data$daily_avg_demand, seasonal.periods = c(7, 365.25))
+
+# Create msts for temperature data (train and test)
+train_temp_data <- temp_daily_avg %>% filter(date >= "2005-01-01" & date <= "2009-12-31")
+test_temp_data <- temp_daily_avg %>% filter(date >= "2010-01-01" & date <= "2010-02-28")
+
+msts_temp_train <- msts(train_temp_data$daily_mean_temp, seasonal.periods = c(7, 365.25))
+msts_temp_test <- msts(test_temp_data$daily_mean_temp, seasonal.periods = c(7, 365.25))
+
+# Step 3: Generate Fourier terms for training data (demand and temperature)
+xreg_train_demand <- fourier(msts_demand_train, K = c(2, 4))
+xreg_train_temp <- fourier(msts_temp_train, K = c(2, 4))
+
+# Combine demand and temperature Fourier terms for training
+xreg_train <- cbind(xreg_train_demand, xreg_train_temp)
+
+# Step 4: Fit Neural Network model (NN) with Fourier terms and temperature data
+NN_fit <- nnetar(msts_demand_train,
+                 p = 1,
+                 P = 0,
+                 xreg = xreg_train,
+                 lambda = 0)  # Box-Cox transform if needed
+
+# Step 5: Generate Fourier terms for testing data (demand and temperature)
+xreg_test_demand <- fourier(msts_demand_test, K = c(2, 4))
+xreg_test_temp <- fourier(msts_temp_test, K = c(2, 4))
+
+# Combine demand and temperature Fourier terms for testing
+xreg_test <- cbind(xreg_test_demand, xreg_test_temp)
+
+# Step 6: Forecast using the trained NN model for the testing period (Jan-Feb 2010)
+NN_fc_test <- forecast(NN_fit,
+                       xreg = xreg_test,
+                       h = length(msts_demand_test))
+
+# Step 7: Calculate RMSE for the test period (Jan-Feb 2010)
+rmse <- sqrt(mean((NN_fc_test$mean - test_data$daily_avg_demand)^2))
+print(paste("RMSE: ", rmse))
+
+# Step 8: Visualize the forecasted and actual values for Jan-Feb 2010
+plot_data <- data.frame(
+  date = c(train_data$date, test_data$date),
+  demand = c(train_data$daily_avg_demand, NN_fc_test$mean),
+  type = c(rep("Actual", length(train_data$date)), rep("Forecast", length(test_data$date)))
+)
+
+ggplot(plot_data, aes(x = date, y = demand, color = type)) +
+  geom_line() +
+  scale_color_manual(values = c("Actual" = "blue", "Forecast" = "red")) +
+  ylab("Daily Electricity Demand") +
+  ggtitle("Actual vs Forecasted Daily Demand (Jan-Feb 2010)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Step 9: Re-train the model on the full dataset (2005-2010)
+full_data <- df_daily_avg %>% filter(date >= "2005-01-01" & date <= "2010-12-31")
+msts_demand_full <- msts(full_data$daily_avg_demand, seasonal.periods = c(7, 365.25))
+
+# Generate Fourier terms for the full training data (demand and temperature)
+full_temp_data <- temp_daily_avg %>% filter(date >= "2005-01-01" & date <= "2010-12-31")
+msts_temp_full <- msts(full_temp_data$daily_mean_temp, seasonal.periods = c(7, 365.25))
+
+xreg_full_demand <- fourier(msts_demand_full, K = c(2, 4))
+xreg_full_temp <- fourier(msts_temp_full, K = c(2, 4))
+
+# Combine demand and temperature Fourier terms for the full dataset
+xreg_full <- cbind(xreg_full_demand, xreg_full_temp)
+
+# Re-train the NN model with the full dataset (2005-2010)
+NN_fit_full <- nnetar(msts_demand_full,
+                      p = 1,
+                      P = 0,
+                      xreg = xreg_full,
+                      lambda = 0)
+
+# Step 10: Forecast for Jan-Feb 2011 using the re-trained model
+n_forecast_days <- 59  # Forecast for 59 days (Jan 1, 2011 to Feb 28, 2011)
+xreg_future_demand <- fourier(msts_demand_full, K = c(2, 4), h = n_forecast_days)
+xreg_future_temp <- fourier(msts_temp_full, K = c(2, 4), h = n_forecast_days)
+
+# Combine future regressors (demand and temperature) for forecasting
+xreg_future <- cbind(xreg_future_demand, xreg_future_temp)
+
+# Forecast for Jan-Feb 2011
+NN_fc_2011 <- forecast(NN_fit_full,
+                       xreg = xreg_future,
+                       h = n_forecast_days)
+
+# Step 11: Plot the forecast for Jan-Feb 2011
+forecast_dates_2011 <- seq.Date(from = as.Date("2011-01-01"), by = "day", length.out = n_forecast_days)
+
+# Combine the forecasted values for Jan-Feb 2011 into a data frame for plotting
+forecast_2011_df <- data.frame(
+  date = forecast_dates_2011,
+  forecast_demand = as.numeric(NN_fc_2011$mean)
+)
+
+# Plot the forecasted values for Jan-Feb 2011
+ggplot() +
+  geom_line(data = forecast_2011_df, aes(x = date, y = forecast_demand), color = "red", size = 1) +
+  ylab("Daily Electricity Demand") +
+  ggtitle("Forecast for Jan-Feb 2011 (Re-trained Model)") +
+  theme_minimal()
+
+
+```
+
+Incorp non-linear temp relation
+
+```{r}
+
+# Step 1: Generate polynomial terms for temperature to capture nonlinear effects
+train_data <- df_daily_avg %>% filter(date >= "2005-01-01" & date <= "2009-12-31")
+test_data <- df_daily_avg %>% filter(date >= "2010-01-01" & date <= "2010-02-28")
+
+# Create msts for demand and temperature data (train and test)
+msts_demand_train <- msts(train_data$daily_avg_demand, seasonal.periods = c(7, 365.25))
+msts_demand_test <- msts(test_data$daily_avg_demand, seasonal.periods = c(7, 365.25))
+
+train_temp_data <- temp_daily_avg %>% filter(date >= "2005-01-01" & date <= "2009-12-31")
+test_temp_data <- temp_daily_avg %>% filter(date >= "2010-01-01" & date <= "2010-02-28")
+
+msts_temp_train <- msts(train_temp_data$daily_mean_temp, seasonal.periods = c(7, 365.25))
+msts_temp_test <- msts(test_temp_data$daily_mean_temp, seasonal.periods = c(7, 365.25))
+
+# Step 2: Generate Fourier terms for training data (demand and temperature)
+xreg_train_demand <- fourier(msts_demand_train, K = c(2, 4))
+xreg_train_temp <- fourier(msts_temp_train, K = c(2, 4))
+
+# Step 3: Create polynomial terms for temperature (non-linear relationship)
+train_data <- train_data %>%
+  mutate(temp_poly_2 = train_temp_data$daily_mean_temp^2, temp_poly_3 = train_temp_data$daily_mean_temp^3)
+
+# Combine Fourier terms for demand and temperature
+xreg_train <- cbind(xreg_train_demand, xreg_train_temp, train_data$temp_poly_2, train_data$temp_poly_3)
+
+# Step 4: Fit Neural Network model (NN) with Fourier terms and polynomial temperature terms
+NN_fit <- nnetar(msts_demand_train,
+                 p = 1,
+                 P = 0,
+                 xreg = xreg_train,
+                 lambda = 0)  # Box-Cox transform if needed
+
+# Step 5: Generate Fourier terms and polynomial terms for testing data (Jan-Feb 2010)
+xreg_test_demand <- fourier(msts_demand_test, K = c(2, 4))
+xreg_test_temp <- fourier(msts_temp_test, K = c(2, 4))
+
+# Create polynomial terms for temperature in test data
+test_data <- test_data %>%
+  mutate(temp_poly_2 = test_temp_data$daily_mean_temp^2, temp_poly_3 = test_temp_data$daily_mean_temp^3)
+
+# Combine Fourier terms for demand and temperature for testing
+xreg_test <- cbind(xreg_test_demand, xreg_test_temp, test_data$temp_poly_2, test_data$temp_poly_3)
+
+# Step 6: Forecast using the trained NN model for the testing period (Jan-Feb 2010)
+NN_fc_test <- forecast(NN_fit,
+                       xreg = xreg_test,
+                       h = length(msts_demand_test))
+
+# Step 7: Calculate RMSE for the test period (Jan-Feb 2010)
+rmse <- sqrt(mean((NN_fc_test$mean - test_data$daily_avg_demand)^2))
+print(paste("RMSE: ", rmse))
+
+# Step 8: Visualize the forecasted and actual values for Jan-Feb 2010
+plot_data <- data.frame(
+  date = c(train_data$date, test_data$date),
+  demand = c(train_data$daily_avg_demand, NN_fc_test$mean),
+  type = c(rep("Actual", length(train_data$date)), rep("Forecast", length(test_data$date)))
+)
+
+ggplot(plot_data, aes(x = date, y = demand, color = type)) +
+  geom_line() +
+  scale_color_manual(values = c("Actual" = "blue", "Forecast" = "red")) +
+  ylab("Daily Electricity Demand") +
+  ggtitle("Actual vs Forecasted Daily Demand (Jan-Feb 2010)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+
+```{r}
+
+# ---- 1. Prepare the full historical datasets (2005–2010) ----
+full_load <- df_daily_avg   %>% filter(date >= "2005-01-01" & date <= "2010-12-31")
+full_temp <- temp_daily_avg %>% filter(date >= "2005-01-01" & date <= "2010-12-31")
+
+msts_load <- msts(full_load$daily_avg_demand,
+                  seasonal.periods = c(7, 365.25),
+                  start = c(2005, 1))
+msts_temp <- msts(full_temp$daily_mean_temp,
+                  seasonal.periods = c(7, 365.25),
+                  start = c(2005, 1))
+
+# ---- 2. Forecast daily temperature Jan–Feb 2011 with STL+ETS ----
+# stlf() handles multiple seasonality by first STL-decomposing
+fc_temp_obj <- stlf(msts_temp, method="ets", h=59)
+fc_temp_2011 <- as.numeric(fc_temp_obj$mean)
+
+# ---- 3. Generate Fourier regressors for the 59-day forecast horizon ----
+xreg_load_fc <- fourier(msts_load, K = c(2, 4), h = 59)
+xreg_temp_fc <- fourier(msts_temp, K = c(2, 4), h = 59)
+
+# ---- 4. Build polynomial temperature features for the forecast period ----
+future_temp <- data.frame(temp = fc_temp_2011) %>%
+  mutate(temp2 = temp^2,
+         temp3 = temp^3)
+
+# ---- 5. Combine all regressors into one matrix ----
+xreg_combined_fc <- cbind(
+  xreg_load_fc,
+  xreg_temp_fc,
+  future_temp$temp2,
+  future_temp$temp3
+) %>% as.matrix()
+
+# ---- 6. Re-train the load model on 2005–2010 with matching regressors ----
+# (Assumes you have already built `NN_fit_full` with exactly these regressors):
+# xreg_full_load <- cbind(
+#   fourier(msts_load, K=c(2,4)),
+#   fourier(msts_temp, K=c(2,4)),
+#   full_temp$daily_mean_temp^2,
+#   full_temp$daily_mean_temp^3
+# )
+# NN_fit_full <- nnetar(msts_load, xreg=xreg_full_load, lambda=0)
+
+# ---- 7. Forecast daily load Jan–Feb 2011 using the STL-ETS temperature regressors ----
+NN_load_fc <- forecast(NN_fit_full,
+                       xreg = xreg_combined_fc,
+                       h    = 59)
+
+# ---- 8. Visualize the load forecast ----
+autoplot(NN_load_fc) +
+  ggtitle("Load Forecast Jan–Feb 2011 (STL-ETS Temp + NN+Fourier)") +
+  ylab("Daily Electricity Demand")
+
+# ---- 9. Build a data frame of the results ----
+forecast_dates <- seq.Date(from = as.Date("2011-01-01"), by = "day", length.out = 59)
+forecast_2011_df <- data.frame(
+  date            = forecast_dates,
+  forecast_demand = as.numeric(NN_load_fc$mean)
+)
+
+# ---- 10. Save the forecast to CSV ----
+write.csv(forecast_2011_df,
+          "final_load_forecast_JanFeb2011_STLTemp.csv",
+          row.names = FALSE)
+
+
+```
+
+
+```{r}
+
+# 1) extract the mean forecasts
+fc_no_temp   <- as.numeric(NN_fc_2011$mean)
+fc_with_temp <- as.numeric(NN_load_fc$mean)
+
+# 2) simple hybrid by averaging
+hybrid_fc <- 0.7*fc_no_temp + 0.3*fc_with_temp
+
+# 3) build a dates vector
+forecast_dates <- seq.Date(from = as.Date("2011-01-01"),
+                           by   = "day",
+                           length.out = length(hybrid_fc))
+
+# 4) assemble into one data.frame
+hybrid_df <- data.frame(
+  date            = forecast_dates,
+  no_temp         = fc_no_temp,
+  with_temp       = fc_with_temp,
+  hybrid_forecast = hybrid_fc
+)
+
+# 5) quick plot
+library(ggplot2)
+ggplot(hybrid_df, aes(x = date)) +
+  geom_line(aes(y = no_temp,         color = "No Temp")) +
+  geom_line(aes(y = with_temp,       color = "With Temp")) +
+  geom_line(aes(y = hybrid_forecast, color = "Hybrid"), size = 1.1) +
+  scale_color_manual(values = c("No Temp"="blue",
+                                "With Temp"="green",
+                                "Hybrid"  ="red")) +
+  labs(title="Jan–Feb 2011: NN No-Temp vs With-Temp vs Hybrid",
+       x="Date", y="Daily Demand", color="Model") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# 6) save hybrid forecast if desired
+write.csv(hybrid_df, "hybrid_load_forecast_JanFeb2011.csv", row.names = FALSE)
+
+```
+
+
+
+```{r}
+
+# Step 1: Forecast temperature for Jan-Feb 2011 using NN+Fourier
+
+# Prepare temperature data for the full dataset (2005-2010)
+msts_temp_full <- msts(full_temp_data$daily_mean_temp, seasonal.periods = c(7, 365.25))
+
+# Generate Fourier terms for the temperature data (demand is not included here)
+xreg_temp_full <- fourier(msts_temp_full, K = c(2, 4))
+
+# Step 2: Fit the Neural Network model for temperature
+NN_fit_temp <- nnetar(msts_temp_full,
+                      p = 1,
+                      P = 0,
+                      xreg = xreg_temp_full,
+                      lambda = 0)
+
+# Step 3: Generate Fourier terms for the forecast period (Jan-Feb 2010)
+xreg_future_temp <- fourier(msts_temp_full, K = c(2, 4), h = 59)  # Forecast for 59 days
+
+# Forecast the temperature for Jan-Feb 2010
+NN_fc_temp_2011 <- forecast(NN_fit_temp,
+                            xreg = xreg_future_temp,
+                            h = 59)
+
+# Step 4: Combine forecasted temperature values for Jan-Feb 2010 into a data frame
+forecast_temp_2011_df <- data.frame(
+  date = seq.Date(from = as.Date("2011-01-01"), by = "day", length.out = 59),
+  forecast_temp = as.numeric(NN_fc_temp_2011$mean)
+)
+
+# Step 5: Plot the forecasted temperature for Jan-Feb 2011
+ggplot(forecast_temp_2011_df, aes(x = date, y = forecast_temp)) +
+  geom_line(color = "blue", size = 1) +
+  ylab("Forecasted Temperature") +
+  ggtitle("Forecasted Temperature for Jan-Feb 2011") +
+  theme_minimal()
+
+
+```
+
+Normalizing temp data and then incorporating
+
+```{r}
+
+# Calculate mean and sd from full training temp (2005–2010)
+temp_mean <- mean(full_temp_data$daily_mean_temp, na.rm = TRUE)
+temp_sd <- sd(full_temp_data$daily_mean_temp, na.rm = TRUE)
+
+# Standardize full temp data and create polynomial terms
+full_temp_data <- full_temp_data %>%
+  mutate(
+    temp_std = (daily_mean_temp - temp_mean) / temp_sd,
+    temp_std_sq = temp_std^2,
+    temp_std_cu = temp_std^3
+  )
+forecast_temp_2011_df <- forecast_temp_2011_df %>%
+  mutate(
+    temp_std = (forecast_temp - temp_mean) / temp_sd,
+    temp_std_sq = temp_std^2,
+    temp_std_cu = temp_std^3
+  )
+# Combine Fourier + standardized polynomial temp features
+xreg_full <- cbind(
+  fourier(msts_demand_full, K = c(2, 4)),
+  full_temp_data$temp_std,
+  full_temp_data$temp_std_sq,
+  full_temp_data$temp_std_cu
+)
+
+# Re-train NN model
+NN_fit_final <- nnetar(msts_demand_full,
+                       p = 1, P = 0,
+                       xreg = xreg_full,
+                       lambda = 0)
+xreg_future <- cbind(
+  fourier(msts_demand_full, K = c(2, 4), h = 59),
+  forecast_temp_2011_df$temp_std,
+  forecast_temp_2011_df$temp_std_sq,
+  forecast_temp_2011_df$temp_std_cu
+)
+
+NN_fc_2011 <- forecast(NN_fit_final,
+                       xreg = xreg_future,
+                       h = 59)
+# Final forecast output
+forecast_final_df <- data.frame(
+  date = seq.Date(from = as.Date("2011-01-01"), by = "day", length.out = 59),
+  forecast_demand = as.numeric(NN_fc_2011$mean)
+)
+
+ggplot(forecast_final_df, aes(x = date, y = forecast_demand)) +
+  geom_line(color = "darkgreen") +
+  labs(title = "Final Forecast: NN + Fourier + Scaled Poly Temp", y = "Demand") +
+  theme_minimal()
+
+write_xlsx(forecast_final_df, "final_forecast_nn_fourier_scaledtemp.xlsx")
+
+
+```
+
+
+
+```{r}
+# Step 1: Extract Temperature Data for Jan-Feb (2005-2010)
+temp_jan_feb <- full_temp_data %>%
+  filter(month(date) %in% c(1, 2) & year(date) >= 2005 & year(date) <= 2010)
+
+# Step 2: Combine Forecasted Temperature for Jan-Feb 2010
+# Ensure you have forecasted temperature data for Jan-Feb 2010 from the previous steps
+forecast_temp_2011_df <- data.frame(
+  date = seq.Date(from = as.Date("2011-01-01"), by = "day", length.out = 59),  # Jan 1 to Feb 28, 2010
+  forecast_temp = as.numeric(NN_fc_temp_2011$mean)
+)
+
+# Step 3: Plot Historical Temperature Data (Jan-Feb 2005-2010) and Forecasted Temperature (Jan-Feb 2010)
+ggplot() +
+  geom_line(data = temp_jan_feb, aes(x = date, y = daily_mean_temp, color = as.factor(year(date))), size = 1) +
+  geom_line(data = forecast_temp_2011_df, aes(x = date, y = forecast_temp), color = "red", size = 1) +
+  scale_color_manual(values = rainbow(6)) +
+  ylab("Temperature") +
+  ggtitle("Temperature for Jan-Feb (2005-2010) and Forecasted Temp for Jan-Feb 2010") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(color = "Year")  # Legend to distinguish different years
+
+
+
+```
+
+
+
+
+```{r}
+
+# Step 1: Prepare the full dataset (2005-2010)
+full_data <- df_daily_avg %>% filter(date >= "2005-01-01" & date <= "2010-12-31")
+msts_demand_full <- msts(full_data$daily_avg_demand, seasonal.periods = c(7, 365.25))
+
+# Prepare temperature data for the full dataset (2005-2010)
+full_temp_data <- temp_daily_avg %>% filter(date >= "2005-01-01" & date <= "2010-12-31")
+msts_temp_full <- msts(full_temp_data$daily_mean_temp, seasonal.periods = c(7, 365.25))
+
+# Step 2: Generate Fourier terms for the full dataset (demand and temperature)
+xreg_full_demand <- fourier(msts_demand_full, K = c(2, 4))
+xreg_full_temp <- fourier(msts_temp_full, K = c(2, 4))
+
+# Create polynomial terms for temperature (non-linear relationship)
+full_data <- full_data %>%
+  mutate(temp_poly_2 = full_temp_data$daily_mean_temp^2, temp_poly_3 = full_temp_data$daily_mean_temp^3)
+
+# Combine Fourier terms for demand and temperature
+xreg_full <- cbind(xreg_full_demand, xreg_full_temp, full_data$temp_poly_2, full_data$temp_poly_3)
+
+# Step 3: Re-train the NN model with the full dataset (2005-2010)
+NN_fit_full <- nnetar(msts_demand_full,
+                      p = 1,
+                      P = 0,
+                      xreg = xreg_full,
+                      lambda = 0)  # Box-Cox transform if needed
+
+# Step 4: Forecast for January-February 2011 using the re-trained model
+n_forecast_days <- 59  # Forecast for 59 days (Jan 1, 2011 to Feb 28, 2011)
+xreg_future_demand <- fourier(msts_demand_full, K = c(2, 4), h = n_forecast_days)
+xreg_future_temp <- fourier(msts_temp_full, K = c(2, 4), h = n_forecast_days)
+
+# Step 6: Create polynomial terms for temperature for the forecast period (Jan-Feb 2011)
+forecast_arima <- forecast(arima_model, xreg = fourier(msts_temp_full, K = c(2, 4), h = 59))
+
+# Use forecasted temperature from the ARIMA model for Jan-Feb 2010
+forecasted_temp_2011 <- forecast_arima$mean  # Forecasted temperature for Jan-Feb 2011
+
+# Create polynomial terms for forecasted temperature (temp^2 and temp^3)
+future_temp <- data.frame(temp = forecasted_temp_2011)  # Forecasted temperature for Jan-Feb 2011
+future_temp <- future_temp %>%
+  mutate(temp_poly_2 = temp^2, temp_poly_3 = temp^3)
+
+# Combine the future regressors (Fourier + polynomial terms for temperature)
+xreg_future_combined <- cbind(xreg_future_demand, xreg_future_temp, future_temp$temp_poly_2, future_temp$temp_poly_3)
+
+# Forecast for Jan-Feb 2011
+NN_fc_2011 <- forecast(NN_fit_full,
+                       xreg = xreg_future_combined,
+                       h = n_forecast_days)
+
+# Step 6: Create forecast dates for Jan-Feb 2011
+forecast_dates_2011 <- seq.Date(from = as.Date("2011-01-01"), by = "day", length.out = n_forecast_days)
+
+# Combine the forecasted values for Jan-Feb 2011 into a data frame for plotting
+forecast_2011_df <- data.frame(
+  date = forecast_dates_2011,
+  forecast_demand = as.numeric(NN_fc_2011$mean)
+)
+
+# Step 7: Plot the forecast for Jan-Feb 2011
+ggplot() +
+  geom_line(data = forecast_2011_df, aes(x = date, y = forecast_demand), color = "red", size = 1) +
+  ylab("Daily Electricity Demand") +
+  ggtitle("Forecast for Jan-Feb 2011 (Re-trained Model)") +
+  theme_minimal()
+
+# Residual diagnostics
+checkresiduals(NN_fc_2011)
+acf(na.omit(NN_fc_2011$residuals), main = "ACF of Residuals")
+
+# Save to CSV
+write.csv(forecast_2011_df, "final_forecast_NNfourier_train_temp.csv", row.names = FALSE)
+
+```
+
+
+```{r}
+
+# Step 2: Calculate the average temperature for each day (Jan 1, Jan 2, ..., Feb 28) across all years (2005-2010)
+# Extract the month and day from the 'date' column
+avg_temp_jan_feb <- full_temp_data %>%
+  filter(month(date) %in% c(1, 2)) %>%
+  mutate(day_of_year = format(date, "%m-%d")) %>%  # Extract day-month format (ignoring year)
+  group_by(day_of_year) %>%
+  summarise(avg_temp = mean(daily_mean_temp, na.rm = TRUE))  # Average temp for each day across years
+
+# Step 3: Merge this avg_temp_jan_feb with Jan-Feb 2011 data
+# Now we can use these averages for Jan-Feb 2011, i.e., for each day in 2011, use the corresponding average from previous years
+
+# Forecasted temperature for Jan-Feb 2011 (using the average of corresponding days from Jan-Feb 2005-2010)
+forecast_temp_2011 <- avg_temp_jan_feb$avg_temp  # These are the average temperatures for Jan-Feb 2011
+
+# Step 1: Prepare the full dataset (2005-2010) for demand forecasting
+full_data <- df_daily_avg %>% filter(date >= "2005-01-01" & date <= "2010-12-31")
+msts_demand_full <- msts(full_data$daily_avg_demand, seasonal.periods = c(7, 365.25))
+
+# Prepare the temperature data for the full dataset (2005-2010)
+full_temp_data <- temp_daily_avg %>% filter(date >= "2005-01-01" & date <= "2010-12-31")
+msts_temp_full <- msts(full_temp_data$daily_mean_temp, seasonal.periods = c(7, 365.25))
+
+# Step 2: Generate Fourier terms for the full dataset (demand and temperature)
+xreg_full_demand <- fourier(msts_demand_full, K = c(2, 4))
+xreg_full_temp <- fourier(msts_temp_full, K = c(2, 4))
+
+# Create polynomial terms for temperature (non-linear relationship)
+full_data <- full_data %>%
+  mutate(temp_poly_2 = full_temp_data$daily_mean_temp^2, temp_poly_3 = full_temp_data$daily_mean_temp^3)
+
+# Combine Fourier terms for demand and temperature
+xreg_full <- cbind(xreg_full_demand, xreg_full_temp, full_data$temp_poly_2, full_data$temp_poly_3)
+
+# Step 3: Re-train the NN model with the full dataset (2005-2010)
+NN_fit_full <- nnetar(msts_demand_full,
+                      p = 1,
+                      P = 0,
+                      xreg = xreg_full,
+                      lambda = 0)  # Box-Cox transform if needed
+
+# Step 4: Forecast for January-February 2011 using the re-trained model
+n_forecast_days <- 59  # Forecast for 59 days (Jan 1, 2011 to Feb 28, 2011)
+xreg_future_demand <- fourier(msts_demand_full, K = c(2, 4), h = n_forecast_days)
+
+# Step 5: Generate Fourier terms for temperature for the forecast period
+xreg_future_temp <- fourier(msts_temp_full, K = c(2, 4), h = n_forecast_days)
+
+# Step 6: Create polynomial terms for temperature for the forecast period (Jan-Feb 2011)
+# Use the average temperature for Jan-Feb 2011 (calculated previously)
+forecast_temp_2011 <- avg_temp_jan_feb$avg_temp  # Use the average temperature for Jan-Feb 2011
+
+# Create polynomial terms for forecasted temperature (temp^2 and temp^3)
+future_temp <- data.frame(temp = forecast_temp_2011)  # Forecasted temperature for Jan-Feb 2011
+future_temp <- future_temp %>%
+  mutate(temp_poly_2 = temp^2, temp_poly_3 = temp^3)
+
+# Step 7: Ensure all regressors have the same number of rows (same length)
+# Combine the future regressors (Fourier + polynomial terms for temperature)
+xreg_future_combined <- cbind(xreg_future_demand, xreg_future_temp, future_temp$temp_poly_2, future_temp$temp_poly_3)
+
+# Step 8: Forecast for Jan-Feb 2011
+NN_fc_2011 <- forecast(NN_fit_full,
+                       xreg = xreg_future_combined,
+                       h = n_forecast_days)
+
+# Step 9: Create forecast dates for Jan-Feb 2011
+forecast_dates_2011 <- seq.Date(from = as.Date("2011-01-01"), by = "day", length.out = n_forecast_days)
+
+# Combine the forecasted values for Jan-Feb 2011 into a data frame for plotting
+forecast_2011_df <- data.frame(
+  date = forecast_dates_2011,
+  forecast_demand = as.numeric(NN_fc_2011$mean)
+)
+
+# Step 10: Plot the forecast for Jan-Feb 2011
+ggplot() +
+  geom_line(data = forecast_2011_df, aes(x = date, y = forecast_demand), color = "red", size = 1) +
+  ylab("Daily Electricity Demand") +
+  ggtitle("Forecast for Jan-Feb 2011 (Re-trained Model with Forecasted Temperature)") +
+  theme_minimal()
+
+# Residual diagnostics
+checkresiduals(NN_fc_2011)
+acf(na.omit(NN_fc_2011$residuals), main = "ACF of Residuals")
+
+# Save to CSV
+write.csv(forecast_2011_df, "final_forecast_NNfourier_train_temp_avg_2011.csv", row.names = FALSE)
+
+
+```
+
+
+```{r}
+
+# Step 1: Prepare the entire historical demand data (2005-2010)
+historical_demand_df <- df_daily_avg %>%
+  filter(date >= "2005-01-01" & date <= "2010-12-31") %>%
+  select(date, daily_avg_demand)
+
+# Rename column to match the forecasted demand data
+colnames(historical_demand_df) <- c("date", "forecast_demand")
+
+# Step 2: Add forecasted demand for Jan-Feb 2011
+# Forecasted data for Jan-Feb 2011 (from the previous steps)
+forecasted_demand_df <- data.frame(
+  date = forecast_dates_2011,  # Jan 1, 2011 to Feb 28, 2011
+  forecast_demand = as.numeric(NN_fc_2011$mean)  # Forecasted demand for Jan-Feb 2011
+)
+
+# Step 3: Combine the historical data and the forecasted data
+combined_data <- rbind(historical_demand_df, forecasted_demand_df)
+
+# Step 4: Plot the historical demand data along with the forecasted demand for Jan-Feb 2011
+ggplot(combined_data, aes(x = date, y = forecast_demand)) +
+  geom_line(color = "blue", size = 1) +  # Historical data (2005-2010)
+  geom_line(data = forecasted_demand_df, aes(x = date, y = forecast_demand), color = "red", size = 1) +  # Forecasted data (Jan-Feb 2011)
+  labs(title = "Historical and Forecasted Daily Electricity Demand",
+       x = "Date",
+       y = "Daily Electricity Demand") +
+  theme_minimal() +
+  scale_x_date(date_labels = "%b %d", date_breaks = "1 month") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("Historical (2005-2010) and Forecasted Demand for Jan-Feb 2011") +
+  scale_color_manual(values = c("blue" = "Historical Demand", "red" = "Forecasted Demand"))
+
+# Save the plot if necessary
+# ggsave("forecasted_vs_historical_demand.png")
+
+
+```
+
+
+```{r}
+
+library(xgboost)
+library(dplyr)
+library(tidyr)
+
+# Step 1: Prepare the historical data
+full_data <- df_daily_avg %>% filter(date >= "2005-01-01" & date <= "2010-12-31")
+msts_demand_full <- msts(full_data$daily_avg_demand, seasonal.periods = c(7, 365.25))
+
+# Prepare the temperature data for the full dataset (2005-2010)
+full_temp_data <- temp_daily_avg %>% filter(date >= "2005-01-01" & date <= "2010-12-31")
+msts_temp_full <- msts(full_temp_data$daily_mean_temp, seasonal.periods = c(7, 365.25))
+
+# Step 2: Feature Engineering
+# Create lag features for the past demand values
+full_data <- full_data %>%
+  mutate(lag1 = lag(daily_avg_demand, 1),  # 1 day lag
+         lag7 = lag(daily_avg_demand, 7),  # 1 week lag
+         lag30 = lag(daily_avg_demand, 30))  # 1 month lag
+
+# Create rolling averages for demand over the last 7 days and 30 days
+full_data <- full_data %>%
+  mutate(rolling_avg_7 = zoo::rollapply(daily_avg_demand, 7, mean, fill = NA, align = 'right'),
+         rolling_avg_30 = zoo::rollapply(daily_avg_demand, 30, mean, fill = NA, align = 'right'))
+
+# Add polynomial terms for temperature
+full_data <- full_data %>%
+  mutate(temp_poly_2 = full_temp_data$daily_mean_temp^2,
+         temp_poly_3 = full_temp_data$daily_mean_temp^3)
+
+# Add Fourier terms for demand (seasonal decomposition)
+xreg_demand_fourier <- fourier(msts_demand_full, K = c(2, 4))
+
+# Prepare the feature matrix (X) and target vector (y)
+features <- cbind(xreg_demand_fourier, full_data[, c("lag1", "lag7", "lag30", "rolling_avg_7", "rolling_avg_30", "temp_poly_2", "temp_poly_3")])
+target <- full_data$daily_avg_demand
+
+# Step 3: Prepare the dataset for XGBoost
+# Ensure the features are in matrix form
+features_matrix <- as.matrix(features[!is.na(target), ])
+
+# Create the XGBoost data matrix (DMatrix)
+dtrain <- xgb.DMatrix(data = features_matrix, label = target[!is.na(target)])
+
+# Now you can proceed to train the XGBoost model
+
+# Step 4: Train XGBoost model
+params <- list(
+  objective = "reg:squarederror",  # Regression task
+  eval_metric = "rmse",  # Evaluation metric: RMSE
+  max_depth = 6,  # Depth of trees
+  eta = 0.1,  # Learning rate
+  subsample = 0.8,  # Subsample ratio
+  colsample_bytree = 0.8  # Subsample features for each tree
+)
+
+# Train model with 100 rounds (iterations)
+xgb_model <- xgb.train(params = params, data = dtrain, nrounds = 100)
+
+# Step 5: Prepare features for the forecast period (Jan-Feb 2011)
+# Use the same feature engineering for the forecast period:
+# Lag features, rolling averages, temperature transformations, and Fourier terms
+
+# Ensure forecast_temp_2011 has 59 values, one for each day in Jan-Feb 2011
+forecast_temp_2011 <- avg_temp_jan_feb$avg_temp[1:59]  # Select the first 59 values to match the forecast period
+
+# Step 2: Create the forecast data frame for Jan 1 to Feb 28, 2011
+forecast_data <- data.frame(date = seq.Date(from = as.Date("2011-01-01"), by = "day", length.out = 59))
+
+# Step 3: Assign the corresponding temperature data to the forecast period
+forecast_data$temp <- forecast_temp_2011  # Now this should work without error
+
+# Create lag and rolling average features for the forecast period (from 2010 data)
+forecast_data$lag1 <- tail(full_data$daily_avg_demand, 1)  # Start with the last observed value (lag1)
+forecast_data$lag7 <- mean(tail(full_data$daily_avg_demand, 7))  # Last 7 days average
+forecast_data$lag30 <- mean(tail(full_data$daily_avg_demand, 30))  # Last 30 days average
+
+# Rolling averages
+forecast_data$rolling_avg_7 <- mean(tail(full_data$daily_avg_demand, 7))
+forecast_data$rolling_avg_30 <- mean(tail(full_data$daily_avg_demand, 30))
+
+# Polynomial temperature terms
+forecast_data$temp_poly_2 <- forecast_data$temp^2
+forecast_data$temp_poly_3 <- forecast_data$temp^3
+
+# Fourier terms for the forecast period
+forecast_xreg_demand_fourier <- fourier(msts_demand_full, K = c(2, 4), h = 59)
+
+# Combine all features for the forecast period
+forecast_features <- cbind(forecast_xreg_demand_fourier, forecast_data[, c("lag1", "lag7", "lag30", "rolling_avg_7", "rolling_avg_30", "temp_poly_2", "temp_poly_3")])
+
+# Step 6: Ensure forecast_features is a numeric matrix
+forecast_features_matrix <- as.matrix(forecast_features)
+
+# Create the XGBoost data matrix (DMatrix) for the forecast period
+dforecast <- xgb.DMatrix(data = forecast_features_matrix)
+
+# Step 7: Generate the forecast for Jan-Feb 2011
+forecasted_demand <- predict(xgb_model, dforecast)
+
+# Step 8: Create a data frame for the forecasted demand
+forecast_2011_df <- data.frame(
+  date = forecast_data$date,  # Jan 1, 2011 to Feb 28, 2011
+  forecast_demand = forecasted_demand
+)
+
+# Step 9: Plot the forecast for Jan-Feb 2011
+ggplot() +
+  geom_line(data = forecast_2011_df, aes(x = date, y = forecast_demand), color = "red", size = 1) +
+  ylab("Daily Electricity Demand") +
+  ggtitle("Forecast for Jan-Feb 2011 (XGBoost with Engineered Features)") +
+  theme_minimal()
+
+# Save the forecast to CSV
+write.csv(forecast_2011_df, "forecasted_demand_xgboost_2011.csv", row.names = FALSE)
+
+
+```
+
+
+
